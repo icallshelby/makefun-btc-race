@@ -10,24 +10,38 @@ It trades Coinbase Wrapped BTC (cbBTC) against USDC on 1-minute bars with
 The bot buys dips and sells the bounce, and does nothing else:
 
 - **Entry** (flat only, one dip per episode): the trailing 60-minute return
-  is between −110 and −40 bps, and the fall has slowed (trailing 15-minute
-  return no worse than −70 bps — it never catches an accelerating knife).
-- **Size**: 90% of cash, cut to 36% when the trailing 240-minute return is
-  below −100 bps (in a grinding downtrend the same dip is traded, but
-  small, because more of them fail there).
-- **Exit** (whole position, first trigger wins): +60 bps take profit,
-  −90 bps stop loss, or a 75-batch time stop.
-- A 15-batch cooldown after every exit and an episode lock until the
+  is between −80 and −38 bps, and the fall has slowed (trailing 15-minute
+  return no worse than −90 bps — it never catches an accelerating knife).
+- **Size**: 100% of cash. The pool's quoted depth (~$1.17M) dwarfs a
+  ~$1,000 order, so price impact is under a basis point and undeployed
+  cash is pure drag; in testing the score rose monotonically from 90%
+  sizing up to 100%.
+- **Deep-downtrend veto**: if the trailing 240-minute return is below
+  −160 bps the dip is skipped entirely. (The first version traded these
+  at reduced size instead; skipping scored better — in a grinding slide
+  the bounce rarely repays the failures on the way down.)
+- **Exit** (whole position, first trigger wins): +52 bps take profit, or
+  a 90-batch time stop. There is deliberately **no price stop**: the
+  first version's −90 bps stop and 75-batch hold were found cutting
+  winners — dips that dip further usually still bounce inside 90 minutes,
+  while stopped-out trades never came back. Removing the stop and
+  lengthening the hold was worth more than every entry-side refinement
+  combined.
+- A 10-batch cooldown after every exit and an episode lock until the
   trailing return recovers above −10 bps keep one slide from being bought
   repeatedly. Every order caps slippage at 100 bps from the decision close.
 
 The design comes from an event study of the dev window: on this thin
 on-chain pool, strength was sold (trailing +60 bps → sharply negative
-forward returns) and weakness was bought back (a 40–110 bps hourly drop →
-a bounce larger than the ~26 bps a full-size round trip costs in fees,
-slippage and price impact). Momentum, EMA-cross and breakout variants all
+forward returns) and weakness was bought back (an hourly drop in the
+38–80 bps zone → a bounce larger than the ~26 bps a round trip costs in
+fees, slippage and price impact; drops deeper than ~120 bps kept falling
+on a 75-minute horizon). Momentum, EMA-cross and breakout variants all
 lost money after fees in the same replica; the dip was the only signal
-that cleared the cost hurdle.
+that cleared the cost hurdle. This is version 2 of the bot: a parameter
+sweep and structural review of version 1 (+12.73) on the same replica —
+exit redesign first (no stop, 90-batch hold), then the entry retune
+(band, veto in place of down-sizing, full sizing).
 
 ## Files
 
@@ -49,17 +63,19 @@ the kit's frozen 1,440-bar dev window:
 
 | | |
 |---|---|
-| Final cash | 1,012.733193 USDC |
-| Net PnL | **+12.733193 USDC** (dev gate: > 0 ✓) |
-| Filled orders | 19 (10 buys, 9 sells) + closing flatten |
-| Fees paid | 6.359710 USDC |
-| Max drawdown | 0.55% (guardrail: ≤ 25%) |
+| Final cash | 1,024.304162 USDC |
+| Net PnL | **+24.304162 USDC** (dev gate: > 0 ✓) |
+| Filled orders | 20 (10 buys, 10 sells; last exit is a time stop, no closing flatten) |
+| Fees paid | 8.071141 USDC |
+| Max drawdown | 0.69% (guardrail: ≤ 25%) |
+| Split halves | +4.562823 (first half) / +13.415336 (second half) |
 | Do-nothing baseline | 0.00 USDC, 0 trades (fails the gate by rule) |
 | Buy-and-hold reference | −13.44 USDC |
+| Version 1 of this bot | +12.733193 USDC, 19 fills |
 
 Two executions produce byte-identical replies; the whole 1,440-batch run
 takes ~0.2 s of wall time on one core (budget: 1,800 s), and the largest
-reply is 146 bytes (limit: 65,536).
+reply is 147 bytes (limit: 65,536).
 
 ## Notes
 
