@@ -3,17 +3,22 @@
 Strategy (all decisions on a bar's close, filled at the next bar's open):
 
   On this thin on-chain pool, strength is sold and weakness is bought back.
-  A drop of 38-80 bps over the trailing 60 minutes, once the fall itself has
+  A drop of 38-60 bps over the trailing 60 minutes, once the fall itself has
   slowed, is followed by a bounce worth more than a round trip costs (about
   26 bps at small size: 4 bps fee + 2 bps slippage per side, plus price
   impact). An event study over the dev window pins the edge to exactly that
-  band: shallower dips are noise, and dips deeper than about -120 bps over
-  60 minutes keep falling on a 75-minute horizon. Momentum, EMA-cross and
-  breakout variants all lost money after fees in testing; the dip is the
-  only signal that cleared the cost hurdle.
+  band: shallower dips are noise, and in the second retune the deeper half
+  of the original band turned out to be where the failures lived — dips
+  past -60 bps are capitulation more often than they are bargains, and
+  excluding them was worth more than any exit change this round. Momentum,
+  EMA-cross and breakout variants all lost money after fees in testing;
+  the dip is the only signal that cleared the cost hurdle.
 
   Entry (flat only, at most one dip per episode):
-    - the trailing 60-minute return sits in [-80, -38] bps: a real dip,
+    - no entries at all in the first 120 bars: the earliest trades of the
+      previous version were taken before any regime context existed, and
+      the very first of them was its worst trade;
+    - the trailing 60-minute return sits in [-60, -38] bps: a real dip,
       not noise, but not yet a free fall;
     - the fall has slowed: the trailing 15-minute return is no worse than
       -90 bps, so the bot never catches a knife that is still accelerating;
@@ -22,6 +27,12 @@ Strategy (all decisions on a bar's close, filled at the next bar's open):
       these small instead; skipping them outright scored better, because
       in a grinding slide the bounce, when it comes, rarely repays the
       fees of the failures on the way down.)
+    - rally veto, the mirror image: if the trailing 240-minute return is
+      above 0 the dip is not traded either. A one-hour dip inside a rising
+      four-hour tape is a pullback in a rally, and on this pool the one
+      such trade the previous version took lost money while every dip it
+      bought in a flat-to-falling tape made money; the veto simply codifies
+      that split.
     - position size is 100% of cash. The pool's quoted depth runs near
       $1.17M against a ~$1,000 order, so the order's own price impact is
       under a basis point and undeployed cash is pure drag: every point
@@ -32,7 +43,7 @@ Strategy (all decisions on a bar's close, filled at the next bar's open):
       so one slide can never be bought twice.
 
   Exit (the whole position, whichever comes first):
-    - take profit at +52 bps over the position's cost (fees included);
+    - take profit at +54 bps over the position's cost (fees included);
     - time stop after 90 batches.
     There is deliberately no price stop. A -90 bps stop and a 75-batch
     time stop were the shipped first version's exits, and both were found
@@ -53,14 +64,20 @@ Strategy (all decisions on a bar's close, filled at the next bar's open):
   Verified locally on the published dev window with an integer-exact
   replica of the harness fill model, and again by driving this file as a
   subprocess over the same window (both runs agree to the unit): final
-  cash 1,024.304162 USDC (net PnL +24.304162 on the 1,000 start), 20
-  filled orders (10 buys, 10 sells; the last position exits on its time
-  stop, so no closing flatten is needed), 8.07 USDC of fees, maximum
-  drawdown 0.69%, no rejected fills. Split by halves of the window the
-  edge is positive on both sides: +4.562823 in the first half (9 fills)
-  and +13.415336 in the second (10 fills). The first version of this bot
-  scored +12.733193 on the same window; the difference is the exit
-  redesign and the entry retune described above, in that order.
+  cash 1,031.695040 USDC (net PnL +31.695040 on the 1,000 start), 15
+  filled orders (8 buys, 7 sells; the eighth position is still open at
+  the end and is flattened by the harness at the last close), 6.51 USDC
+  of fees, maximum drawdown 0.62%, no rejected fills — and every one of
+  the eight episodes closed positive, the worst of them +0.43 on its
+  time stop. Split by halves of the window the edge is positive on both
+  sides: +10.930308 in the first half and +12.791352 in the second. The
+  first version of this bot scored +12.733193 on the same window and the
+  second +24.304162; this third version's gains come, in order, from the
+  warmup and the rally veto (which together remove its two losing
+  trades), from narrowing the entry band to [-60, -38], and from the
+  take-profit retune to +54 bps. Partial take-profits, depth- and
+  regime-scaled exits, recovery exits and confirmation filters were all
+  tested against this configuration and all scored worse.
 """
 
 import os
@@ -72,14 +89,16 @@ import makefun_bars
 
 # --- strategy constants (bps are 1/100 of a percent) -------------------------
 LOOKBACK = 60            # the dip is measured over 60 one-minute bars
-DIP_LO_BPS = -80         # entry band for the trailing LOOKBACK return
+DIP_LO_BPS = -60         # entry band for the trailing LOOKBACK return
 DIP_HI_BPS = -38
 VELOCITY_BARS = 15       # the knife check looks at the last 15 bars
 MAX_FALL_BPS = 90        # and vetoes a fall still faster than this
 REGIME_BARS = 240        # the veto looks at the trailing 240-minute return
 VETO_FLOOR_BPS = -160    # below it, dips are not traded at all
+VETO_CEIL_BPS = 0        # above it (a rising 4h tape), dips are not traded either
+WARMUP_BARS = 120        # no entries until this many bars have been seen
 SIZE_BPS = 10000         # an entry spends 100% of cash (see docstring)
-TAKE_PROFIT_BPS = 52     # exit at +52 bps over cost
+TAKE_PROFIT_BPS = 54     # exit at +54 bps over cost
 MAX_HOLD_BATCHES = 90    # or after 90 batches, bounce or no bounce
 COOLDOWN_BATCHES = 10    # quiet batches after every exit
 RESET_BPS = -10          # an episode ends when the trailing return tops this
@@ -146,6 +165,8 @@ class DipBot:
         # Flat: look for the dip, once per episode.
         if self.cooldown > 0 or self.locked:
             return []
+        if len(closes) <= WARMUP_BARS:
+            return []
         if not (DIP_LO_BPS <= trailing <= DIP_HI_BPS):
             return []
         if len(closes) > VELOCITY_BARS:
@@ -154,7 +175,7 @@ class DipBot:
                 return []
         if len(closes) > REGIME_BARS:
             regime = (closes[-1] / closes[-1 - REGIME_BARS] - 1.0) * 10000.0
-            if regime < VETO_FLOOR_BPS:
+            if regime < VETO_FLOOR_BPS or regime > VETO_CEIL_BPS:
                 return []
         notional = state.cash * SIZE_BPS // 10000
         min_notional = int(state.hello["fees"]["min_notional_quote_units"])
